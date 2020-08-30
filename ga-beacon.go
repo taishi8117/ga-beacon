@@ -51,21 +51,22 @@ func generateUUID(cid *string) error {
 }
 
 func log(c context.Context, ua string, ip string, cid string, values url.Values) error {
-	var targetURL string
+	var targetURL *url.URL
 	if isDebug {
 		logger.Printf("Debug URL: %s", beaconDebugURL)
-		targetURL = beaconDebugURL
+		targetURL, _ = url.Parse(beaconDebugURL)
 	} else {
-		targetURL = beaconURL
+		targetURL, _ = url.Parse(beaconURL)
 	}
 
-	req, _ := http.NewRequestWithContext(c, "POST", targetURL, strings.NewReader(values.Encode()))
+	targetURL.RawQuery = values.Encode()
+
+	logger.Printf("Target URL: %s", targetURL.String())
+
+	req, _ := http.NewRequestWithContext(c, "GET", targetURL.String(), nil)
 	req.Header.Add("User-Agent", ua)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	if isDebug {
-		logger.Printf("HTTP Param Values:\n%s", string(values.Encode()))
-	}
 
 	cli := http.Client{}
 	resp, err := cli.Do(req)
@@ -96,6 +97,8 @@ func logHit(c context.Context, params []string, query url.Values, ua string, ip 
 	//
 	// GA Protocol reference: https://developers.google.com/analytics/devguides/collection/protocol/v1/reference
 
+	// logger.Printf("logHit(%v, %v, %v, %s, %s, %s)", c, params, query, ua, ip, cid)
+
 	payload := url.Values{
 		"v":   {"1"},        // protocol version = 1
 		"t":   {"pageview"}, // hit type
@@ -103,6 +106,7 @@ func logHit(c context.Context, params []string, query url.Values, ua string, ip 
 		"cid": {cid},        // unique client ID (server generated UUID)
 		"dp":  {params[1]},  // page path
 		"uip": {ip},         // IP address of the user
+		"ua": {ua},			 // User Agent
 	}
 
 	for key, val := range query {
