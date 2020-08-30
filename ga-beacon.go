@@ -1,22 +1,24 @@
-package beacon
+package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"html/template"
 	"io/ioutil"
+	logger "log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
-
-	"appengine"
-	"appengine/delay"
-	"appengine/urlfetch"
 )
 
-const beaconURL = "http://www.google-analytics.com/collect"
+const beaconURL = "https://www.google-analytics.com/collect"
+const beaconDebugURL = "https://www.google-analytics.com/debug/collect"
+
+const isDebug = false
 
 var (
 	pixel        = mustReadFile("static/pixel.gif")
@@ -26,10 +28,6 @@ var (
 	badgeFlatGif = mustReadFile("static/badge-flat.gif")
 	pageTemplate = template.Must(template.New("page").ParseFiles("page.html"))
 )
-
-func init() {
-	http.HandleFunc("/", handler)
-}
 
 func mustReadFile(path string) []byte {
 	b, err := ioutil.ReadFile(path)
@@ -52,24 +50,47 @@ func generateUUID(cid *string) error {
 	return nil
 }
 
-var delayHit = delay.Func("collect", logHit)
+func log(c context.Context, ua string, ip string, cid string, values url.Values) error {
+	var targetURL string
+	if isDebug {
+		logger.Printf("Debug URL: %s", beaconDebugURL)
+		targetURL = beaconDebugURL
+	} else {
+		targetURL = beaconURL
+	}
 
-func log(c appengine.Context, ua string, ip string, cid string, values url.Values) error {
-	req, _ := http.NewRequest("POST", beaconURL, strings.NewReader(values.Encode()))
+	req, _ := http.NewRequestWithContext(c, "POST", targetURL, strings.NewReader(values.Encode()))
 	req.Header.Add("User-Agent", ua)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	if resp, err := urlfetch.Client(c).Do(req); err != nil {
-		c.Errorf("GA collector POST error: %s", err.Error())
-		return err
-	} else {
-		c.Debugf("GA collector status: %v, cid: %v, ip: %s", resp.Status, cid, ip)
-		c.Debugf("Reported payload: %v", values)
+	if isDebug {
+		logger.Printf("HTTP Param Values:\n%s", string(values.Encode()))
 	}
+
+	cli := http.Client{}
+	resp, err := cli.Do(req)
+	defer resp.Body.Close()
+	if err != nil {
+		logger.Printf("GA collector POST error: %s", err.Error())
+		return err
+	}
+	logger.Printf("GA collector status: %v, cid: %v, ip: %s", resp.Status, cid, ip)
+
+	if isDebug {
+		logger.Printf("Logger output")
+		responseData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			logger.Printf("error in reading response")
+			return err
+		}
+		logger.Printf("GA collector response: %s", string(responseData))
+	}
+
+	logger.Printf("Reported payload: %v", values)
 	return nil
 }
 
-func logHit(c appengine.Context, params []string, query url.Values, ua string, ip string, cid string) error {
+func logHit(c context.Context, params []string, query url.Values, ua string, ip string, cid string) error {
 	// 1) Initialize default values from path structure
 	// 2) Allow query param override to report arbitrary values to GA
 	//
@@ -92,14 +113,14 @@ func logHit(c appengine.Context, params []string, query url.Values, ua string, i
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	c := appengine.NewContext(r)
+	c := r.Context()
 	params := strings.SplitN(strings.Trim(r.URL.Path, "/"), "/", 2)
 	query, _ := url.ParseQuery(r.URL.RawQuery)
 	refOrg := r.Header.Get("Referer")
 
 	// / -> redirect
 	if len(params[0]) == 0 {
-		http.Redirect(w, r, "https://github.com/igrigorik/ga-beacon", http.StatusFound)
+		http.Redirect(w, r, "https://emigru.com/", http.StatusFound)
 		return
 	}
 
@@ -125,7 +146,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := pageTemplate.ExecuteTemplate(w, "page.html", templateParams); err != nil {
 			http.Error(w, "could not show account page", 500)
-			c.Errorf("Cannot execute template: %v", err)
+			logger.Printf("Cannot execute template: %v", err)
 		}
 		return
 	}
@@ -134,14 +155,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	var cid string
 	if cookie, err := r.Cookie("cid"); err != nil {
 		if err := generateUUID(&cid); err != nil {
-			c.Debugf("Failed to generate client UUID: %v", err)
+			logger.Printf("Failed to generate client UUID: %v", err)
 		} else {
-			c.Debugf("Generated new client UUID: %v", cid)
+			logger.Printf("Generated new client UUID: %v", cid)
 			http.SetCookie(w, &http.Cookie{Name: "cid", Value: cid, Path: fmt.Sprint("/", params[0])})
 		}
 	} else {
 		cid = cookie.Value
-		c.Debugf("Existing CID found: %v", cid)
+		logger.Printf("Existing CID found: %v", cid)
 	}
 
 	if len(cid) != 0 {
@@ -151,8 +172,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("CID", cid)
 
 		logHit(c, params, query, r.Header.Get("User-Agent"), r.RemoteAddr, cid)
-		// delayHit.Call(c, params, r.Header.Get("User-Agent"), cid)
 	}
+
+	logger.Printf("Serving with cid: %v", cid)
 
 	// Write out GIF pixel or badge, based on presence of "pixel" param.
 	if _, ok := query["pixel"]; ok {
@@ -170,5 +192,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Write(badge)
+	}
+}
+
+func main() {
+	http.HandleFunc("/", handler)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+		logger.Printf("Defaulting to port %s", port)
+	}
+
+	logger.Printf("Listening on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		logger.Fatal(err)
 	}
 }
