@@ -67,7 +67,6 @@ func log(c context.Context, ua string, ip string, cid string, values url.Values)
 	req.Header.Add("User-Agent", ua)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-
 	cli := http.Client{}
 	resp, err := cli.Do(req)
 	defer resp.Body.Close()
@@ -106,7 +105,7 @@ func logHit(c context.Context, params []string, query url.Values, ua string, ip 
 		"cid": {cid},        // unique client ID (server generated UUID)
 		"dp":  {params[1]},  // page path
 		"uip": {ip},         // IP address of the user
-		"ua": {ua},			 // User Agent
+		"ua":  {ua},         // User Agent
 	}
 
 	for key, val := range query {
@@ -175,7 +174,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Expires", cacheUntil)
 		w.Header().Set("CID", cid)
 
-		logHit(c, params, query, r.Header.Get("User-Agent"), r.RemoteAddr, cid)
+		// logHit(c, params, query, r.Header.Get("User-Agent"), r.RemoteAddr, cid)
+		// Google Analytics seems not recording Sheet's scripts execution UA.
+		logHit(c, params, query, "Spreadsheet", r.RemoteAddr, cid)
 	}
 
 	logger.Printf("Serving with cid: %v", cid)
